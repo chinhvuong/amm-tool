@@ -95,109 +95,179 @@ Currently **no tool** in Solana ecosystem offers:
 
 ## 🏗️ 2. Technical Architecture
 
-### 2.1 System Overview (Real-time Backend Architecture)
+### 2.1 System Overview (Layered Architecture)
 
 ```mermaid
-graph TD
-    U[👤 User Browser] -->|HTTPS REST| LB[⚖️ Load Balancer]
-    U -.->|WebSocket| WS[🔌 WebSocket Gateway]
-    LB --> BE1[🔷 NestJS API #1]
-    LB --> BE2[🔷 NestJS API #2]
-    WS --> BE1
-    WS --> BE2
-    BE1 --> RC[(⚡ Redis Cache<br/>+ Pub/Sub<br/>+ Distributed Lock)]
-    BE2 --> RC
-    BE1 --> DB[(🗄️ PostgreSQL<br/>+ TimescaleDB)]
-    BE2 --> DB
-    BE1 -->|Parallel Fetch| H[🌐 Helius API]
-    BE1 -->|Parallel Fetch| B[🦅 Birdeye API]
-    BE1 -->|Parallel Fetch| F[📊 Flipside API]
-    BE1 -->|Parallel Fetch| J[🪐 Jupiter API]
-    RC -->|Pub/Sub notify| WS
-    WS -.->|Push updates| U
+graph TB
+    subgraph "Client Layer"
+        C[Web Browser]
+    end
+    
+    subgraph "Application Layer"
+        API[REST API Server]
+        WS[WebSocket Server]
+    end
+    
+    subgraph "Cache Layer"
+        REDIS[(Redis<br/>Cache + Pub/Sub + Lock)]
+    end
+    
+    subgraph "Data Layer"
+        DB[(PostgreSQL<br/>TimescaleDB)]
+    end
+    
+    subgraph "External APIs"
+        EXT[Helius + Birdeye<br/>Jupiter + DEX APIs]
+    end
+    
+    C -->|HTTP Request| API
+    C <-.->|WebSocket| WS
+    API --> REDIS
+    API --> DB
+    API -->|Fetch Data| EXT
+    WS --> REDIS
+    REDIS -->|Pub/Sub| WS
+    WS -.->|Push Update| C
 ```
 
-**Backend-centric Architecture with Real-time Push:**
-- ✅ **Backend-only caching** - no frontend/CDN cache → always fresh data
-- ✅ **WebSocket real-time** - push updates when cache refreshes → no polling needed
-- ✅ **Redis Pub/Sub** - broadcast cache updates to all WebSocket clients
-- ✅ **On-demand refresh** - only fetch when user requests
-- ✅ **Stale-while-revalidate** - return stale cache + async refresh + push update via WebSocket
-- ✅ **PostgreSQL + TimescaleDB** - store historical data for analytics
-- ✅ **Distributed locking** - prevent thundering herd, eliminate duplicate API calls
-- ✅ **Stateless backend** - easy horizontal scaling
+**Architecture Principles:**
+- ✅ **Backend-only caching** - single source of truth
+- ✅ **WebSocket push** - real-time updates, no polling
+- ✅ **Redis Pub/Sub** - broadcast to all connected clients
+- ✅ **On-demand** - fetch only when requested
+- ✅ **Stale-while-revalidate** - instant response + async refresh
+- ✅ **Distributed locking** - prevent duplicate API calls
+- ✅ **Stateless** - easy horizontal scaling
 
-### 2.2 Detailed Data Flow (Backend-centric with WebSocket)
+### 2.2 Data Flow Scenarios
 
-#### **Scenario 1: Cache Hit - Fresh Data (85% requests)**
-```
-1. User Request → REST API → Redis Check → Cache Hit (fresh, <30s)
-2. Return cached data immediately
-3. Response time: 50-100ms ⚡
+#### **Scenario 1: Cache Hit - Fresh Data** (85% of requests)
 
-Frontend: Display data instantly
-```
-
-#### **Scenario 2: Cache Hit - Stale Data + WebSocket Push (10% requests)**
-```
-1. User Request → REST API → Redis Check → Cache Hit (stale, 30-60s)
-2. Return stale data immediately (100ms)
-3. Trigger async refresh in background (non-blocking)
-   ├─ Fetch fresh data from APIs (parallel)
-   ├─ Save to Redis + PostgreSQL
-   └─ Publish to Redis Pub/Sub channel
-4. Redis Pub/Sub → Notify WebSocket Gateway
-5. WebSocket → Push fresh data to ALL connected clients watching this token
-6. Frontend: Auto-update UI without polling
-
-Strategy: Stale-While-Revalidate + Real-time Push
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as REST API
+    participant R as Redis Cache
+    
+    C->>API: Request token data
+    API->>R: Check cache
+    R-->>API: Cache HIT (fresh, <30s)
+    API-->>C: Return data (50-100ms)
+    
+    Note over C,R: ⚡ Fast path - no API calls needed
 ```
 
-#### **Scenario 3: Cache Miss (5% requests)**
-```
-1. User Request → REST API → Redis Check → Cache Miss
-2. Acquire Distributed Lock (TTL: 10s) - only 1 request can fetch
-3. Other concurrent requests → Wait 500ms → Read from cache (updated by first request)
-4. First request:
-   ├─ Fetch from APIs in parallel (Helius + Birdeye + Jupiter)
-   ├─ Aggregate & normalize data
-   ├─ Save to Redis (TTL=60s) + PostgreSQL
-   ├─ Publish to Redis Pub/Sub
-   └─ Release Lock
-5. WebSocket → Push to all subscribers
-6. Response time: 500-800ms (first time only or cache expired)
+#### **Scenario 2: Cache Hit - Stale Data + WebSocket Push** (10% of requests)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as REST API
+    participant R as Redis Cache
+    participant WS as WebSocket
+    participant EXT as External APIs
+    participant DB as PostgreSQL
+    
+    C->>API: Request token data
+    API->>R: Check cache
+    R-->>API: Cache HIT (stale, 30-60s)
+    API-->>C: Return stale data (100ms)
+    
+    par Async Refresh
+        API->>EXT: Fetch fresh data (parallel)
+        EXT-->>API: Fresh data
+        API->>R: Update cache
+        API->>DB: Store to database
+        API->>R: Publish to Pub/Sub
+        R->>WS: Notify update
+        WS-.>>C: Push fresh data via WebSocket
+    end
+    
+    Note over C,DB: 🔄 Stale-While-Revalidate + Push
 ```
 
-### 2.3 WebSocket Real-time Strategy
+#### **Scenario 3: Cache Miss + Distributed Lock** (5% of requests)
 
-**Channel subscription pattern:**
-```
-Client connects → Subscribe to token channels
-Client: ws.subscribe('token:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v')
-Backend: Track subscriber → Add to Redis Set
+```mermaid
+sequenceDiagram
+    participant C1 as Client 1
+    participant C2 as Client 2 (concurrent)
+    participant API as REST API
+    participant R as Redis Cache
+    participant WS as WebSocket
+    participant EXT as External APIs
+    participant DB as PostgreSQL
+    
+    par Concurrent Requests
+        C1->>API: Request token data
+        C2->>API: Request same token
+    end
+    
+    API->>R: Check cache
+    R-->>API: Cache MISS
+    
+    API->>R: Acquire lock (SETNX)
+    R-->>API: Lock acquired (Client 1)
+    R-->>API: Lock denied (Client 2)
+    
+    Note over C2,API: Client 2 waits 500ms
+    
+    API->>EXT: Fetch fresh data (parallel)
+    EXT-->>API: Fresh data
+    API->>R: Save cache (TTL=60s)
+    API->>DB: Store to database
+    API->>R: Publish Pub/Sub + Release lock
+    
+    API-->>C1: Return data (500-800ms)
+    
+    C2->>API: Retry after wait
+    API->>R: Check cache
+    R-->>API: Cache HIT (updated by C1)
+    API-->>C2: Return data (100ms)
+    
+    R->>WS: Pub/Sub notify
+    WS-.>>C1: Push update
+    WS-.>>C2: Push update
+    
+    Note over C1,DB: 🔒 Distributed locking prevents duplicate calls
 ```
 
-**Broadcast strategy:**
-```
-Cache refresh event → Redis Pub/Sub publish
-Topic: "token:refresh:{address}"
-Payload: { tokenAddress, data, timestamp }
-→ WebSocket Gateway receives
-→ Broadcast to all clients subscribed to this token
-→ Clients auto-update UI
+### 2.3 WebSocket Real-time Flow
+
+```mermaid
+sequenceDiagram
+    participant C1 as Client 1
+    participant C2 as Client 2
+    participant WS as WebSocket Server
+    participant R as Redis Pub/Sub
+    participant API as Backend API
+    
+    C1->>WS: Connect & Subscribe(tokenAddress)
+    WS->>R: Add to subscribers set
+    
+    C2->>WS: Connect & Subscribe(same token)
+    WS->>R: Add to subscribers set
+    
+    Note over API,R: Cache refresh happens
+    
+    API->>R: Publish("token:refresh", data)
+    R->>WS: Receive Pub/Sub message
+    WS->>R: Get all subscribers
+    
+    par Broadcast to all
+        WS-.>>C1: Push update
+        WS-.>>C2: Push update
+    end
+    
+    Note over C1,C2: Both clients receive update instantly
 ```
 
-**Connection management:**
-- ✅ Heartbeat every 30s - detect dead connections
-- ✅ Auto-reconnect with exponential backoff
-- ✅ Resume from last known state
-- ✅ Stateless: WebSocket state stored in Redis only
-
-**Benefits:**
-- ✅ **No polling needed** - zero unnecessary requests
-- ✅ **Sub-second latency** - push in <100ms
-- ✅ **Efficient** - 1 API call → broadcast to N clients
-- ✅ **Scalable** - Redis Pub/Sub handles millions msgs/sec
+**WebSocket Features:**
+- ✅ **Room-based subscriptions** - subscribe per token
+- ✅ **Heartbeat** - detect dead connections (30s)
+- ✅ **Auto-reconnect** - exponential backoff
+- ✅ **Stateless** - state stored in Redis
+- ✅ **Broadcast efficient** - 1 update → N clients
 
 ### 2.4 Backend Caching Strategy (Single Source of Truth)
 
@@ -844,158 +914,53 @@ CHR = Cache hit rate (%) - default 95%
 
 ---
 
-## ⏰ 9. Timeline & Milestones
+## 👥 9. Team & Expertise
 
-### 9.1 Detailed Development Schedule (Aggressive - 3 Weeks / 240 Hours)
-
-#### **Week 1: Foundation & Backend Core** (80 hours)
-- [ ] **Days 1-2:** VPS Setup & Project scaffold (16h)
-  - VPS Ubuntu setup + Nginx + PostgreSQL + Redis
-  - NestJS backend scaffold
-  - Next.js frontend scaffold
-  - GitHub Actions CI/CD
-  - Environment configuration
-- [ ] **Days 3-4:** API integration & caching (32h)
-  - Helius API client + tests
-  - Birdeye API client + tests
-  - Flipside API client + tests
-  - Data normalization layer
-  - Redis caching implementation
-  - Distributed locking (Redis SETNX)
-- [ ] **Day 5:** WebSocket & Pub/Sub (32h)
-  - Socket.io integration với NestJS
-  - Redis Pub/Sub setup
-  - Room-based subscriptions
-  - Connection management
-  - Unit tests (80%+ coverage)
-
-**Deliverable:** Backend core with caching + WebSocket working
-
-#### **Week 2: REST API + Database + Testing** (80 hours)
-- [ ] **Days 1-2:** REST API endpoints (32h)
-  - `GET /api/tokens/:address` - Get token overview
-  - `GET /api/tokens/:address/holders` - Get holder distribution
-  - `GET /api/tokens/:address/transactions` - Get recent transactions
-  - `GET /api/tokens/:address/chart` - Get OHLCV data
-  - Input validation & error handling
-  - Rate limiter middleware
-  - Circuit breaker pattern
-- [ ] **Day 3:** PostgreSQL + TimescaleDB integration (16h)
-  - Schema design & migrations
-  - Insert logic when cache refreshes
-  - Time-series data aggregation
-  - Compression policies
-- [ ] **Days 4-5:** Testing & optimization (32h)
-  - Unit tests (80%+ coverage)
-  - Integration tests
-  - Load testing (k6) - 1000 concurrent users
-  - WebSocket connection stress test
-  - Performance optimization
-  - Monitoring setup (Prometheus + Grafana)
-
-**Deliverable:** Production-ready Backend API + Database + Monitoring
-
-#### **Week 3: Frontend + Deployment + Handover** (80 hours)
-- [ ] **Days 1-2:** Core UI components (32h)
-  - Token overview page layout
-  - Wallet tracking table with filters & pagination
-  - AMM calculator interface
-  - Holder distribution chart (bubble map)
-  - Milestones visualization
-  - Responsive design (mobile-first)
-  - Dark mode support
-- [ ] **Days 3:** WebSocket client integration (16h)
-  - WebSocket client setup
-  - Subscribe/unsubscribe to token channels
-  - Auto-update UI on push events
-  - Reconnection handling
-  - Loading skeletons & error boundaries
-  - Toast notifications
-- [ ] **Days 4:** Production deployment (16h)
-  - VPS deployment script
-  - Nginx configuration (reverse proxy + WebSocket)
-  - SSL/TLS setup (Let's Encrypt)
-  - PM2 process manager
-  - Database backups setup
-  - Monitoring alerts
-- [ ] **Day 5:** Final polish & handover (16h)
-  - E2E testing (critical paths)
-  - Security audit (OWASP check)
-  - Performance verification
-  - API documentation (Swagger)
-  - Deployment documentation
-  - Knowledge transfer session
-
-**Deliverable:** Production-ready application + Complete documentation
-
-### 9.2 Milestone Checklist
-
-| Milestone | Completion Criteria | Verification | Timeline |
-|-----------|---------------------|--------------|----------|
-| **M1: Backend Core Ready** | APIs + Cache + WebSocket working | Unit tests passing (80%+ coverage) | End of Week 1 |
-| **M2: API Complete** | REST + Database + Monitoring | Load test: 100 req/s + 1000 WS connections | End of Week 2 |
-| **M3: Frontend Complete** | UI + WebSocket client working | Manual QA + Lighthouse >85 + Real-time test | End of Week 3 |
-| **M4: Deployed & Live** | Production deployment complete | Live URL + monitoring active | End of Week 3 |
-
-**Aggressive timeline benefits:**
-- ✅ **3 weeks** instead of 6 weeks - 2x faster
-- ✅ **240 working hours** - focused & efficient
-- ✅ **$3,000 total** - extremely competitive pricing
-- ✅ Fewer dependencies → fewer bugs
-- ✅ Simpler → easier to test
-- ✅ Faster → fastest time-to-market
-
----
-
-## 👥 10. Team & Expertise
-
-### 10.1 Required Skills & Experience
+### 9.1 Required Skills & Experience
 
 | Role | Responsibilities | Required Experience |
 |------|------------------|---------------------|
-| **Full-stack Developer** | End-to-end development | 3+ years NestJS + React |
-| **DevOps Engineer** | CI/CD, monitoring, scaling | 2+ years AWS/GCP/Fly.io |
-| **QA Engineer** | Testing, quality assurance | 2+ years automation testing |
+| **Full-stack Developer** | End-to-end development | 3+ years |
 
-### 10.2 Our Working Style & Commitment
+### 9.2 Our Working Style & Commitment
 
 #### 📢 **Proactive Communication**
-- **Progress reports mỗi 2-3 ngày:** 
-  - Detailed update về tasks completed
-  - Current blockers (nếu có)
+- **Progress reports every 2-3 days:** 
+  - Detailed update on completed tasks
+  - Current blockers (if any)
   - Next 2-3 days plan
-  - Screenshots/videos của progress
-- **Stay in sync:** Bạn luôn biết chính xác tiến độ dự án
-- **Quick response:** Response trong <4 hours (working hours)
-- **Weekly demos:** Live demo features đã complete
+  - Screenshots/videos of progress
+- **Stay in sync:** You always know exact project status
+- **Quick response:** Response within <4 hours (working hours)
+- **Weekly demos:** Live demo of completed features
 
-#### 💎 **Build Sản phẩm có Tâm**
-Chúng tôi không chỉ "complete task" - chúng tôi **build product như của mình**:
+#### 💎 **Build Products with Care**
+We don't just "complete tasks" - we **build products as if they're our own**:
 
-- ✅ **Code quality matters:** Clean code, best practices, không shortcuts
-- ✅ **User experience first:** Mỗi feature được test kỹ từ góc độ user
-- ✅ **Performance optimization:** Không ship code chậm hoặc buggy
-- ✅ **Documentation đầy đủ:** Code comments, API docs, deployment guides
-- ✅ **Think long-term:** Architecture scalable, dễ maintain và extend
+- ✅ **Code quality matters:** Clean code, best practices, no shortcuts
+- ✅ **User experience first:** Every feature tested thoroughly from user perspective
+- ✅ **Performance optimization:** Never ship slow or buggy code
+- ✅ **Complete documentation:** Code comments, API docs, deployment guides
+- ✅ **Think long-term:** Scalable architecture, easy to maintain and extend
 
 #### 🤝 **Long-term Partnership Mindset**
 
-Mục tiêu của chúng tôi không chỉ là hoàn thành 1 project - mà là:
-- 🎯 **Deliver exceptional quality** → Bạn muốn work together again
+Our goal isn't just to complete 1 project - it's to:
+- 🎯 **Deliver exceptional quality** → You want to work together again
 - 🎯 **Build trust** → Transparent, honest communication
-- 🎯 **Exceed expectations** → Over-deliver khi có thể
-- 🎯 **Support sau launch** → 30 days support + quick bug fixes
-- 🎯 **Hợp tác dài hạn** → Sẵn sàng cho các dự án tiếp theo
+- 🎯 **Exceed expectations** → Over-deliver when possible
+- 🎯 **Post-launch support** → 30 days support + quick bug fixes
+- 🎯 **Long-term collaboration** → Ready for future projects together
 
 **Why this matters:**
-> Một project thành công → Nhiều projects trong tương lai → Win-win relationship  
-> Chúng tôi build reputation qua quality, không phải quantity.
+> One successful project → Many projects in the future → Win-win relationship  
+> We build reputation through quality, not quantity.
 
 #### 🔧 **Development Practices**
 
 | Practice | Implementation | Benefit |
 |----------|----------------|---------|
-| **Code Review** | Peer review trước khi merge | Zero critical bugs |
+| **Code Review** | Peer review before merge | Zero critical bugs |
 | **Testing** | 80%+ test coverage | Confidence in deployment |
 | **CI/CD** | Automated testing & deployment | Fast iterations |
 | **Git Workflow** | Feature branches + PRs | Clean commit history |
@@ -1004,69 +969,70 @@ Mục tiêu của chúng tôi không chỉ là hoàn thành 1 project - mà là:
 
 ---
 
-## 🎁 11. Value Proposition Summary
+## 🎁 10. Value Proposition Summary
 
-### Tại sao chọn giải pháp của chúng tôi?
+### Why Choose Our Solution?
 
 #### ✅ **1. Backend-centric Real-time Architecture**
-- **Backend-only caching** → single source of truth, zero staleness ở client
-- **WebSocket push updates** → không cần polling, sub-second latency
-- **Stale-while-revalidate + Pub/Sub** → trả instant + update real-time
+- **Backend-only caching** → single source of truth, zero staleness on client
+- **WebSocket push updates** → no polling needed, sub-second latency
+- **Stale-while-revalidate + Pub/Sub** → instant response + real-time updates
 - **Distributed locking** → prevent thundering herd, zero duplicate API calls
-- **Không cần background worker** → ít dependencies, ít bugs
-- **On-demand fetching** → chỉ fetch khi user thực sự xem
-- Đơn giản hơn → dễ debug, maintain, scale
+- **No background worker** → fewer dependencies, fewer bugs
+- **On-demand fetching** → only fetch when user actually views
+- **Simpler** → easier to debug, maintain, scale
 
 #### ✅ **2. Extremely Cost-Effective**
-- **98% rẻ hơn** so với việc crawl blockchain ($100-129 vs $5000/mo)
-- **Development cost chỉ $3k** - extremely competitive for outsource
+- **98% cheaper** than crawling blockchain ($100-129 vs $5000/mo)
+- **Development cost only $3k** - extremely competitive for outsource
 - **VPS approach** - predictable cost, VPS flat rate $100/mo
-- **API free tiers** - MVP có thể chạy với $0 API costs (95% cache hit rate)
-- **No waste** - chỉ fetch data cho tokens người dùng thực sự quan tâm
-- **No polling waste** - WebSocket push thay vì client polling mỗi 5s
-- **Transparent pricing** - bạn biết chính xác mọi chi phí (VPS + APIs)
+- **API free tiers** - MVP can run with $0 API costs (95% cache hit rate)
+- **No waste** - only fetch data for tokens users actually care about
+- **No polling waste** - WebSocket push instead of client polling every 5s
+- **Transparent pricing** - you know exactly all costs (VPS + APIs)
 
 #### ✅ **3. Fastest Time to Market**
-- **3 tuần (240 hours)** thay vì 6-12 tháng (gấp 8-16x nhanh hơn)
+- **3 weeks (240 hours)** instead of 6-12 months (8-16x faster)
 - **Aggressive timeline** - focused development, no waste
-- MVP production-ready để bắt đầu generate revenue ngay
-- Payback period chỉ **<1 tháng**
+- MVP production-ready to start generating revenue immediately
+- Payback period only **<1 month**
 
 #### ✅ **4. Proven Technology Stack**
-- Sử dụng tech stack production-ready: NestJS, Next.js, Redis
-- Đã được validate bởi hàng ngàn companies worldwide
+- Using production-ready tech stack: Go/Node.js, Next.js, Redis
+- Validated by thousands of companies worldwide
 - Zero experimental technologies → **lower risk**
 
 #### ✅ **5. Scalable & Maintainable**
-- Horizontal scaling sẵn sàng (thêm instance là scale)
-- Stateless architecture → dễ scale
-- Clean code, comprehensive tests → dễ maintain
+- Horizontal scaling ready (add instances to scale)
+- Stateless architecture → easy to scale
+- Clean code, comprehensive tests → easy to maintain
 
 #### ✅ **6. Risk Mitigation Built-in**
-- Multi-provider fallback → no single point of failure
 - Comprehensive monitoring → catch issues early
 - Distributed locking → prevent duplicate API calls
-- Detailed contingency plans → handle mọi scenario
+- Detailed contingency plans → handle any scenario
+- Multi-API fallback → no single point of failure
 
 #### ✅ **7. Clear Success Metrics & Accountability**
-- Measurable KPIs từ ngày đầu tiên
+- Measurable KPIs from day one
 - Weekly demos → full transparency
 - Data-driven decision making
 - 30 days post-launch support included
 
 ---
 
-## 🚀 12. Call to Action
+## 🚀 11. Call to Action
 
-### Chúng tôi cam kết giao:
+### We Commit to Deliver:
 
 #### 📦 **Deliverables**
-- ✅ **AMM Calculator Tool** - Production-ready (Frontend + Backend)
-  - Market cap push calculator
+- ✅ **Wallet Tracker & AMM Calculator Tool** - Production-ready (Frontend + Backend)
+  - Wallet transaction tracking with PnL
+  - Market cap milestone calculator
   - Price impact simulator
-  - Order splitting optimizer
-  - Multi-pool comparison
-- ✅ Complete source code với Git repository
+  - Holder distribution analysis
+  - Auto price feed (20s interval)
+- ✅ Complete source code with Git repository
 - ✅ Complete API documentation (Swagger/OpenAPI)
 - ✅ AMM calculation formulas documented
 - ✅ Deployment scripts & infrastructure as code
@@ -1076,17 +1042,17 @@ Mục tiêu của chúng tôi không chỉ là hoàn thành 1 project - mà là:
 - ✅ Knowledge transfer session
 - ✅ **30 days post-launch support** (bug fixes, minor adjustments)
 
-**Communication during project:**
-- 📊 Progress report mỗi 2-3 ngày (detailed updates)
+**Communication During Project:**
+- 📊 Progress report every 2-3 days (detailed updates)
 - 📹 Weekly video demos of completed features
 - 💬 Daily availability for questions (Slack/Discord/Telegram)
 - 🔍 GitHub access for real-time code review
 
 #### ⏰ **Timeline (Aggressive)**
 - **Week 0:** Kickoff meeting + requirements finalization (1-2 days)
-- **Week 1:** Backend core + API integration + WebSocket
+- **Week 1:** Backend core + API integration + WebSocket + Caching
 - **Week 2:** REST API + Database + Testing + Monitoring
-- **Week 3:** Frontend + Deployment + Handover
+- **Week 3:** Frontend + WebSocket Client + Deployment + Handover
 - **Total: 3 weeks (240 working hours)** from kickoff to production 🚀
 
 #### 💰 **Investment (Extremely Competitive)**
@@ -1096,20 +1062,20 @@ Mục tiêu của chúng tôi không chỉ là hoàn thành 1 project - mà là:
 - **Monthly operating cost:** $100-129/month
   - **VPS:** $100/month (Backend + Database + Redis + Nginx + Monitoring)
   - **APIs:** $0-29/month
-    - Helius: Free tier (100k calls) hoặc Developer $29
+    - Helius: Free tier (100k calls) or Developer $29
     - Birdeye: Free tier (30k calls)
-    - Flipside: Free (unlimited SQL queries)
-  - **MVP có thể start với $100/mo** (APIs dùng free tier)
+    - Jupiter/DEX: Free (unlimited)
+  - **MVP can start with $100/mo** (APIs use free tier)
 - **Payment terms:** 
   - 40% ($1,200) upfront
   - 30% ($900) at Week 2 milestone  
   - 30% ($900) at launch
-- **No hidden fees** - All costs với detailed calculations included
+- **No hidden fees** - All costs with detailed calculations included
 
 #### 📞 **Next Steps**
 
 1. **Schedule kickoff call (30-60 min)**
-   - Discuss requirements chi tiết
+   - Discuss requirements in detail
    - Clarify any technical questions
    - Establish communication channels
    
@@ -1124,7 +1090,7 @@ Mục tiêu của chúng tôi không chỉ là hoàn thành 1 project - mà là:
    - Communication channels active
    
 4. **Stay updated throughout**
-   - Progress reports mỗi 2-3 ngày
+   - Progress reports every 2-3 days
    - Weekly video demos
    - Quick response to questions
    
@@ -1146,11 +1112,13 @@ Mục tiêu của chúng tôi không chỉ là hoàn thành 1 project - mà là:
 |------|------------|
 | **AMM** | Automated Market Maker - algorithmic trading system |
 | **Constant Product** | AMM formula: x * y = k (Uniswap v2 style) |
-| **Pool Reserves** | Amount of tokens trong liquidity pool (x = SOL, y = Token) |
-| **K Value** | Constant product (x * y), không thay đổi khi trade |
-| **Price Impact** | % thay đổi price do trade size vs pool depth |
-| **Slippage** | Difference between expected price và actual execution price |
+| **Pool Reserves** | Amount of tokens in liquidity pool (x = SOL, y = Token) |
+| **K Value** | Constant product (x * y), remains constant during trades |
+| **Price Impact** | % price change due to trade size vs pool depth |
+| **Slippage** | Difference between expected price and actual execution price |
 | **Market Cap** | Total supply × current price |
+| **PnL** | Profit and Loss calculation |
+| **Taker/Maker** | Market taker (buy at ask) vs maker (provide liquidity) |
 
 **Technical Terms:**
 | Term | Definition |
@@ -1158,66 +1126,11 @@ Mục tiêu của chúng tôi không chỉ là hoàn thành 1 project - mà là:
 | **SWR** | Stale-While-Revalidate caching strategy |
 | **WebSocket** | Protocol for real-time bidirectional communication |
 | **Pub/Sub** | Publish-Subscribe messaging pattern |
-| **Socket.io** | WebSocket library với auto-reconnect & rooms |
+| **Socket.io** | WebSocket library with auto-reconnect & room support |
 | **Circuit Breaker** | Pattern to prevent cascading failures |
 | **Distributed Lock** | Synchronization across multiple servers |
 | **TTL** | Time To Live - cache expiration time |
 | **P95** | 95th percentile - 95% of requests faster than this |
-
-### B. API Endpoints Reference
-
-**REST API:**
-```
-GET  /api/tokens/:address              - Get token info & current pools
-GET  /api/tokens/:address/pools        - Get all liquidity pools
-GET  /api/pools/:poolAddress           - Get pool details (reserves, k)
-POST /api/calculate/market-cap-push    - Calculate money needed for target mcap
-POST /api/calculate/price-impact       - Calculate price impact for buy amount
-POST /api/calculate/optimal-split      - Get optimal order splitting strategy
-POST /api/simulate/buy                 - Simulate buy transaction
-GET  /api/pools/compare                - Compare multiple pools/DEXs
-GET  /api/health                       - Health check
-GET  /api/metrics                      - Prometheus metrics
-```
-
-**Example Request:**
-```json
-POST /api/calculate/market-cap-push
-{
-  "tokenAddress": "EPj...",
-  "currentMarketCap": 50000,
-  "targetMarketCap": 100000,
-  "poolAddress": "...",
-  "dex": "raydium"
-}
-```
-
-**Example Response:**
-```json
-{
-  "moneyNeeded": 2.5,           // SOL
-  "priceImpact": 15.3,          // %
-  "tokensReceived": 45000,
-  "newPrice": 0.0022,
-  "newPoolReserves": {...},
-  "effectivePrice": 0.0000555,
-  "slippage": 12.8,             // %
-  "optimalSplit": [...],        // recommended order splits
-  "gasFee": 0.00005             // SOL
-}
-```
-
-**WebSocket Events:**
-```
-// Client → Server
-ws.emit('subscribe', { tokenAddress: 'EPj...' })
-ws.emit('unsubscribe', { tokenAddress: 'EPj...' })
-
-// Server → Client
-ws.on('token:update', { tokenAddress, data, timestamp })
-ws.on('connected', { sessionId, timestamp })
-ws.on('error', { code, message })
-```
 
 ### C. References & Resources
 
@@ -1239,30 +1152,19 @@ ws.on('error', { code, message })
 
 ---
 
-## 📧 Contact Information
-
-**Prepared by:** [Your Name/Team]  
-**Email:** [your-email]  
-**Telegram/Discord:** [your-handle]  
-**Date:** October 16, 2025  
-**Version:** 3.0 - Competitive Outsource Proposal
-
----
-
 ## 🎯 Final Words
 
-> **"The best time to plant a tree was 20 years ago. The second best time is now."**
 
 **Chúng tôi không chỉ build code - chúng tôi build relationships.**
 
-Với approach:
-- 💎 **Quality-first:** Code như của mình
-- 🤝 **Partnership mindset:** Hợp tác dài hạn  
-- 📢 **Proactive communication:** Report mỗi 2-3 ngày
-- ⚡ **Fast delivery:** 3 tuần production-ready
-- 💰 **Transparent pricing:** $3,000 dev
+Our approach:
+- 💎 **Quality-first:** Build products as if they're our own
+- 🤝 **Partnership mindset:** Long-term collaboration  
+- 📢 **Proactive communication:** Reports every 2-3 days
+- ⚡ **Fast delivery:** 3 weeks to production-ready
+- 💰 **Transparent pricing:** $3,000 development
 
-**Project thành công này là bước đầu cho nhiều collaborations trong tương lai.**
+**This successful project is the foundation for many future collaborations.**
 
 
 ---
