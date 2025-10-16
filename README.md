@@ -1029,8 +1029,7 @@ Our goal isn't just to complete 1 project - it's to:
 - ✅ **Wallet Tracker & AMM Calculator Tool** - Production-ready (Frontend + Backend)
   - Wallet transaction tracking with PnL
   - Market cap milestone calculator
-  - Price impact simulator
-  - Holder distribution analysis
+  - Holder distribution
   - Auto price feed (20s interval)
 - ✅ Complete source code with Git repository
 - ✅ Complete API documentation (Swagger/OpenAPI)
@@ -1061,7 +1060,7 @@ Our goal isn't just to complete 1 project - it's to:
   - Outsource-friendly pricing
 - **Monthly operating cost:** $100-129/month
   - **VPS:** $100/month (Backend + Database + Redis + Nginx + Monitoring)
-  - **APIs:** $0-29/month
+  - **APIs:** $0-49/month
     - Helius: Free tier (100k calls) or Developer $29
     - Birdeye: Free tier (30k calls)
     - Jupiter/DEX: Free (unlimited)
