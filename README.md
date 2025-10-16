@@ -78,7 +78,7 @@ Instead of investing hundreds of thousands to crawl blockchain and build custom 
 | **Price impact unclear** | Buy first, realize high slippage later | Pre-calculate exact price impact |
 | **No wallet tracking** | Can't track specific wallets' trades | Comprehensive wallet transaction history |
 | **Manual PnL calculation** | Time-consuming, error-prone | Auto-calculate PnL, avg buy/sell prices |
-| **No holder insights** | Can't see whale movements | Holder distribution + top holders analysis |
+| **No holder insights** | Can't see whale movements | Holder distribution + top holders |
 | **Can't plan market cap push** | Don't know budget needed | Calculate exact SOL needed per MC milestone |
 
 ### 1.2 Market Gap
@@ -477,7 +477,6 @@ Using TimescaleDB compression → reduces 90% storage cost
 - ✅ Current price
 - ✅ Market cap
 - ✅ Volume (24h)
-- ✅ Price change (1h, 24h, 7d)
 - ✅ Total supply & circulating supply
 - ✅ Number of holders
 - ✅ Liquidity in pools
@@ -542,10 +541,6 @@ Using TimescaleDB compression → reduces 90% storage cost
 
 **For each milestone, calculate:**
 - ✅ **SOL needed** to reach target market cap
-- ✅ **Estimated trading fees:**
-  - Jito tips
-  - Slippage
-  - DEX fees (0.25% typical)
 - ✅ **Price impact** percentage
 - ✅ **Optimal split strategy** (if needed)
 - ✅ **Expected tokens received**
@@ -569,18 +564,7 @@ Using TimescaleDB compression → reduces 90% storage cost
 - ✅ Multi-token portfolio tracking
 - ✅ Price alerts (Telegram/Email)
 - ✅ Advanced analytics dashboards
-- ✅ Historical data charts
 - ✅ Whale movement alerts
-- ✅ API access for developers
-
-### 5.3 Future Roadmap (Post-MVP)
-
-| Quarter | Features | Business Value |
-|---------|----------|----------------|
-| **Q1** | WebSocket live updates, Mobile app | Better UX, wider reach |
-| **Q2** | AI-powered alerts, Pattern detection | Premium features |
-| **Q3** | Trading integration (Jupiter), Copy trading | Revenue stream |
-| **Q4** | Portfolio analytics, Tax reporting | Enterprise features |
 
 ---
 
@@ -590,28 +574,18 @@ Using TimescaleDB compression → reduces 90% storage cost
 
 | Metric | Target | Measurement |
 |--------|--------|-------------|
-| **P95 Response Time** | <100ms | Grafana monitoring |
+| **P95 Response Time** | <500ms | Grafana monitoring |
 | **Uptime** | >99.9% | Status page tracking |
 | **Cache Hit Rate** | >95% | Redis analytics |
 | **API Success Rate** | >99.5% | Error logging |
-| **Page Load Time** | <1s | Lighthouse CI |
+| **Page Load Time** | <2s | Lighthouse CI |
 | **Time to Interactive** | <2s | Web Vitals |
 
-### 6.2 Business KPIs
 
-| Metric | Month 1 | Month 3 | Month 6 |
-|--------|---------|---------|---------|
-| **Daily Active Users** | 100 | 500 | 2,000 |
-| **Token Searches/day** | 1,000 | 5,000 | 20,000 |
-| **User Retention (D7)** | 20% | 35% | 50% |
-| **Average Session Time** | 3 min | 5 min | 8 min |
-| **Cost per User** | $1.20 | $0.30 | $0.10 |
-
-### 6.3 Quality Metrics
+### 6.2 Quality Metrics
 
 | Metric | Target | Verification |
 |--------|--------|--------------|
-| **Code Coverage** | >80% | Jest reports |
 | **Type Safety** | 100% | TypeScript strict mode |
 | **Lighthouse Score** | >90 | CI/CD check |
 | **Security Score** | A+ | OWASP ZAP |
@@ -640,26 +614,6 @@ Using TimescaleDB compression → reduces 90% storage cost
 | **Low user adoption** | Medium | High | Marketing plan + community building |
 | **Competitor clone** | High | Medium | Fast iteration + unique features |
 | **Legal/compliance** | Low | High | Terms of service + data privacy policy |
-
-### 7.3 Contingency Plans
-
-**Scenario 1: Primary API (Helius) goes down**
-```
-1. Auto-switch to Birdeye API (5 seconds)
-2. Serve cached data with warning banner
-3. Alert team via PagerDuty
-4. Fallback to Solscan if both down
-Expected downtime: <30 seconds
-```
-
-**Scenario 2: Traffic surge (10x normal)**
-```
-1. Auto-scaling triggers (Fly.io)
-2. Aggressive cache (TTL: 30s → 2 min)
-3. Queue non-critical requests
-4. Graceful degradation (disable heavy features)
-Expected handling: Up to 50x normal traffic
-```
 
 ---
 
