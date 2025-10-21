@@ -180,7 +180,7 @@ sequenceDiagram
         API->>DB: Store to database
         API->>R: Publish to Pub/Sub
         R->>WS: Notify update
-        WS-.>>C: Push fresh data via WebSocket
+        WS-.->>C: Push fresh data via WebSocket
     end
     
     Note over C,DB: 🔄 Stale-While-Revalidate + Push
@@ -226,8 +226,8 @@ sequenceDiagram
     API-->>C2: Return data (100ms)
     
     R->>WS: Pub/Sub notify
-    WS-.>>C1: Push update
-    WS-.>>C2: Push update
+    WS-.->>C1: Push update
+    WS-.->>C2: Push update
     
     Note over C1,DB: 🔒 Distributed locking prevents duplicate calls
 ```
@@ -255,8 +255,8 @@ sequenceDiagram
     WS->>R: Get all subscribers
     
     par Broadcast to all
-        WS-.>>C1: Push update
-        WS-.>>C2: Push update
+        WS-.->>C1: Push update
+        WS-.->>C2: Push update
     end
     
     Note over C1,C2: Both clients receive update instantly
